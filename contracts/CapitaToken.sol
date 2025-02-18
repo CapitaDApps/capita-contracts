@@ -30,8 +30,8 @@ contract CapitaToken is ERC20, Ownable, ReentrancyGuard {
     uint256 public buyTax = 3;
     uint256 public sellTax = 3;
 
-    uint256 public marketingSharePercentage = 50;
-    uint256 public developmentSharePercentage = 20;
+    uint256 public marketingSharePercentage = 40;
+    uint256 public developmentSharePercentage = 30;
     uint256 public liquiditySharePercentage = 30;
 
     IUniswapV2Router02 public uniswapRouter;

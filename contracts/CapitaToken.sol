@@ -1,339 +1,247 @@
 // SPDX-License-Identifier: MIT
 
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.21;
 
-import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {IUniswapV2Router02} from "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
 import {IUniswapV2Factory} from "@uniswap/v2-core/contracts/interfaces/IUniswapV2Factory.sol";
 
 error CapitaToken__BuyTaxCannotExceed_30();
 error CapitaToken__SellTaxCannotExceed_99();
 error CapitaToken__TradingNotEnabled();
 error CapitaToken__MaxPerWalletExceeded();
-error CapitaToken__UniswapPairCannotBeModified();
 error CapitaToken__MaxPerTxExceeded();
 error CapitaToken__InvalidWallet();
 error CapitaToken__InsufficientTokensForSwap();
 
-contract CapitaToken is ERC20, Ownable {
-    fallback() external payable {}
+contract CapitaToken is ERC20, Ownable, ReentrancyGuard {
 
-    receive() external payable {}
-
-    event TradingStatus(bool status, bool limits);
-    event TaxChange(uint8 buyTax, uint8 sellTax);
-    event WalletsChange(
-        address marketingWallet,
-        address developmentWallet,
-        address liquidityWallet
-    );
-    event LimitsInEffect(bool inEffect);
-    event WalletExcluded(address walletAddress, bool excluded);
-    event PairAdded(address pairAddress, bool added);
-
-    bool public tradingEnabled = false;
-
-    uint8 public maxPerWalletPercentage = 3;
-    uint256 public maxPerWallet;
-
-    uint256 public maxPerTxPercentage = 10;
     uint256 public maxPerTx;
-
-    uint256 public swapAmountPercentage = 10;
+    uint256 public maxPerWallet;
     uint256 public swapAmount;
-
-    uint8 public buyTax = 3;
-    uint8 public sellTax = 3; // starting taxes
+    bool public swapEnabled = true;
+    bool public tradingEnabled = false;
 
     address public marketingWallet;
     address public developmentWallet;
-    address public liquidityWallet;
 
-    uint256 public marketingWalletPercent = 30;
-    uint256 public developmentWalletPercent = 50;
-    uint256 public liquidityWalletPercent = 20;
+    uint256 public buyTax = 3;
+    uint256 public sellTax = 3;
 
-    bool public limitsInEffect;
+    uint256 public marketingSharePercentage = 30;
+    uint256 public developmentSharePercentage = 40;
+    uint256 public liquiditySharePercentage = 30;
 
-    bool private swapping;
+    IUniswapV2Router02 public uniswapRouter;
+    address public immutable uniswapPair;
 
-    IUniswapV2Router02 public i_UNISWAP_V2_ROUTER02;
+    mapping(address => bool) public isWhitelisted;
+    mapping(address => bool) public isExcludedFromMaxPerWallet;
+    mapping(address => bool) public isExcludedFromMaxPerTx;
+    mapping(address => bool) public isExcludedFromTax;
 
-    address public immutable i_uniswap_pair_address;
+    bool private inSwap;
+    modifier lockSwap {
+        inSwap = true;
+        _;
+        inSwap = false;
+    }
 
-    mapping(address => bool) public excludedFromFees;
-    mapping(address => bool) public excludeFromMaxTx;
-    mapping(address => bool) public AMMPairs;
+    event TradingStatusUpdated(bool enabled);
+    event TaxesUpdated(uint256 buyTax, uint256 sellTax);
+    event MaxLimitsUpdated(uint256 maxPerTx, uint256 maxPerWallet);
+    event SwapAmountUpdated(uint256 newSwapAmount);
+    event OwnershipRenounced(address indexed previousOwner);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event WalletsUpdated(address indexed newMarketingWallet, address indexed newDevelopmentWallet);
 
     constructor(
-        string memory _tokenName,
-        string memory _tokenSymbol,
-        uint8 _decimals,
-        address _uniswapV2Router
-    ) ERC20(_tokenName, _tokenSymbol) Ownable() {
-        excludedFromFees[msg.sender] = true;
-        excludedFromFees[address(this)] = true;
-        // excludedFromLimits[_uniswapV2Router] = true;
-        excludedFromFees[address(0)] = true;
-        excludedFromFees[address(0xdead)] = true;
-
-        i_UNISWAP_V2_ROUTER02 = IUniswapV2Router02(_uniswapV2Router);
-
-        IUniswapV2Factory _uniswapV2Factory = IUniswapV2Factory(
-            i_UNISWAP_V2_ROUTER02.factory()
-        );
-
-        i_uniswap_pair_address = _uniswapV2Factory.createPair(
-            i_UNISWAP_V2_ROUTER02.WETH(),
-            address(this)
-        );
-
-        AMMPairs[i_uniswap_pair_address] = true;
-
-        excludeFromMaxTx[_uniswapV2Router] = true;
-        excludeFromMaxTx[address(this)] = true;
-        excludeFromMaxTx[msg.sender] = true;
-        excludeFromMaxTx[address(0)] = true;
-        excludeFromMaxTx[address(0xdead)] = true;
-
-        _mint(msg.sender, 1000000000 * 10 ** _decimals);
-    }
-
-    function updateExcludedFromFees(
-        address _address,
-        bool _exempt
-    ) public onlyOwner {
-        excludedFromFees[_address] = _exempt;
-        emit WalletExcluded(_address, _exempt);
-    }
-
-    function updateExcludeFromMaxTx(
-        address _address,
-        bool _exempt
-    ) public onlyOwner {
-        excludeFromMaxTx[_address] = _exempt;
-    }
-
-    function addAMMPair(address ammPair, bool include) public onlyOwner {
-        if (ammPair == i_uniswap_pair_address) {
-            revert CapitaToken__UniswapPairCannotBeModified();
-        }
-        AMMPairs[ammPair] = include;
-        emit PairAdded(ammPair, include);
-    }
-
-    function updateTradingParams(
-        bool _status,
-        uint8 _maxPerWalletPercent,
-        uint256 _maxPerTxPercentage,
-        uint256 _swapAmountPercentage,
-        bool _limitsInEffect
-    ) public onlyOwner {
-        tradingEnabled = _status;
-        limitsInEffect = _limitsInEffect;
-
-        if (_maxPerWalletPercent > 0) {
-            maxPerWalletPercentage = _maxPerWalletPercent;
-            maxPerWallet = (totalSupply() * maxPerWalletPercentage) / 100;
-        }
-
-        // percentage 0.1% is equivalent to 1%
-        // therefore 0.1/100 == 1/1000
-
-        if (_maxPerTxPercentage > 0) {
-            maxPerTxPercentage = _maxPerTxPercentage;
-            maxPerTx = (totalSupply() * maxPerTxPercentage) / 1000;
-        }
-        if (_swapAmountPercentage > 0) {
-            swapAmountPercentage = _swapAmountPercentage;
-            swapAmount = (totalSupply() * _swapAmountPercentage) / 1000;
-        }
-
-        emit TradingStatus(_status, _limitsInEffect);
-    }
-
-    function updateWallets(
+        address _routerAddress,
         address _marketingWallet,
         address _developmentWallet,
-        address _liquidityWallet
-    ) public onlyOwner {
-        if (_marketingWallet == address(0)) {
-            revert CapitaToken__InvalidWallet();
-        }
-        if (_developmentWallet == address(0)) {
-            revert CapitaToken__InvalidWallet();
-        }
-        if (_liquidityWallet == address(0)) {
-            revert CapitaToken__InvalidWallet();
-        }
+        uint256 _swapAmount
+    ) ERC20("CapitaToken", "CPT") {
+        require(_routerAddress != address(0), "Invalid Router Address");
+        require(_marketingWallet != address(0), "Invalid Marketing Wallet");
+        require(_developmentWallet != address(0), "Invalid Development Wallet");
 
         marketingWallet = _marketingWallet;
         developmentWallet = _developmentWallet;
-        liquidityWallet = _liquidityWallet;
+        swapAmount = _swapAmount;
 
-        emit WalletsChange(
-            _marketingWallet,
-            _developmentWallet,
-            _liquidityWallet
+        uniswapRouter = IUniswapV2Router02(_routerAddress);
+        uniswapPair = IUniswapV2Factory(uniswapRouter.factory()).createPair(
+            address(this),
+            uniswapRouter.WETH()
+        );
+
+        _mint(msg.sender, 1e9 * 10 ** decimals());
+
+        maxPerTx = totalSupply() * 3 / 100;
+        maxPerWallet = totalSupply() * 3 / 100;
+
+        isWhitelisted[msg.sender] = true;
+        isWhitelisted[address(uniswapRouter)] = true;
+
+        isExcludedFromMaxPerWallet[msg.sender] = true;
+        isExcludedFromMaxPerWallet[address(uniswapRouter)] = true;
+        isExcludedFromMaxPerTx[msg.sender] = true;
+        isExcludedFromMaxPerTx[address(uniswapRouter)] = true;
+
+        isExcludedFromTax[msg.sender] = true;
+        isExcludedFromTax[address(uniswapRouter)] = true;
+    }
+
+    function enableTrading(bool _status) external onlyOwner {
+        tradingEnabled = _status;
+        emit TradingStatusUpdated(tradingEnabled);
+    }
+
+     function updateWallets(address _newMarketingWallet, address _newDevelopmentWallet) external onlyOwner {
+        require(_newMarketingWallet != address(0), "Invalid Marketing Wallet");
+        require(_newDevelopmentWallet != address(0), "Invalid Development Wallet");
+        marketingWallet = _newMarketingWallet;
+        developmentWallet = _newDevelopmentWallet;
+        emit WalletsUpdated(_newMarketingWallet, _newDevelopmentWallet);
+    }
+
+    function updateSwapAmount(uint256 _swapAmount) external onlyOwner {
+        swapAmount = _swapAmount;
+        emit SwapAmountUpdated(_swapAmount);
+    }
+    
+     function updateDistribution(uint256 _marketingShare, uint256 _developmentShare, uint256 _liquidityShare) external onlyOwner {
+        require(
+            _marketingShare + _developmentShare + _liquidityShare == 100,
+            "Total distribution must be 100%"
+        );
+        marketingSharePercentage = _marketingShare;
+        developmentSharePercentage = _developmentShare;
+        liquiditySharePercentage = _liquidityShare;
+    }
+
+    function updateTaxes(uint256 _buyTax, uint256 _sellTax) external onlyOwner {
+        if (_buyTax > 30) revert CapitaToken__BuyTaxCannotExceed_30();
+        if (_sellTax > 99) revert CapitaToken__SellTaxCannotExceed_99();
+        buyTax = _buyTax;
+        sellTax = _sellTax;
+        emit TaxesUpdated(_buyTax, _sellTax);
+    }
+
+    function updateWhitelist(address _account, bool _status) external onlyOwner {
+        isWhitelisted[_account] = _status;
+    }
+
+     function excludeFromTax(address _account, bool _status) external onlyOwner {
+        isExcludedFromTax[_account] = _status;
+
+        }
+
+    function _transfer(address from, address to, uint256 amount) internal override {
+        if (!tradingEnabled && !isWhitelisted[from] && !isWhitelisted[to]) {
+            revert CapitaToken__TradingNotEnabled();
+        }
+
+        if (!isExcludedFromMaxPerTx[from] && !isExcludedFromMaxPerTx[to]) {
+            require(amount <= maxPerTx, "Transfer exceeds max per transaction limit");
+        }
+
+        if (!isExcludedFromMaxPerWallet[to]) {
+            require(balanceOf(to) + amount <= maxPerWallet, "Transfer exceeds max wallet limit");
+        }
+        
+     function transferOwnership(address newOwner) public override onlyOwner {
+        require(newOwner != address(0), "New owner cannot be zero address");
+        emit OwnershipTransferred(owner(), newOwner);
+        _transferOwnership(newOwner);
+    }
+
+    function renounceOwnership() public override onlyOwner {
+        emit OwnershipRenounced(owner());
+        _transferOwnership(address(0));
+    }
+
+    function recoverTokens(address tokenAddress, uint256 amount) external onlyOwner {
+        IERC20(tokenAddress).transfer(owner(), amount);
+    }
+
+       
+        uint256 taxAmount = 0;
+        if (!isExcludedFromTax[from] && !isExcludedFromTax[to]) {
+            if (from == uniswapPair) {
+                taxAmount = amount * buyTax / 100;
+            } else if (to == uniswapPair) {
+                taxAmount = amount * sellTax / 100;
+            }
+
+            if (taxAmount > 0) {
+                super._transfer(from, address(this), taxAmount);
+                amount -= taxAmount;
+            }
+        }
+
+        super._transfer(from, to, amount);
+
+        if (balanceOf(address(this)) >= swapAmount && !inSwap && from != uniswapPair && swapEnabled) {
+            _swapAndDistribute();
+        }
+    }
+
+    function _swapAndDistribute() private lockSwap nonReentrant {
+        uint256 contractBalance = balanceOf(address(this));
+        require(contractBalance >= swapAmount, "Insufficient tokens for swap");
+
+        uint256 marketingShare = contractBalance * marketingSharePercentage / 100;
+        uint256 developmentShare = contractBalance * developmentSharePercentage / 100;
+        uint256 liquidityShare = contractBalance * liquiditySharePercentage / 100;
+
+        _swapTokensForEth(marketingShare + developmentShare);
+
+        uint256 contractEthBalance = address(this).balance;
+        uint256 marketingEth = contractEthBalance * marketingSharePercentage / 100;
+        uint256 developmentEth = contractEthBalance * developmentSharePercentage / 100;
+
+        payable(marketingWallet).transfer(marketingEth);
+        payable(developmentWallet).transfer(developmentEth);
+
+        uint256 halfLiq = liquidityShare / 2;
+        uint256 otherHalfLiq = liquidityShare - halfLiq;
+        uint256 ethLiq = address(this).balance;
+
+        _swapTokensForEth(halfLiq);
+        _addLiquidity(otherHalfLiq, ethLiq);
+    } 
+
+    function _swapTokensForEth(uint256 tokenAmount) private {
+        address;
+        path[0] = address(this);
+        path[1] = uniswapRouter.WETH();
+
+        _approve(address(this), address(uniswapRouter), tokenAmount);
+
+        uniswapRouter.swapExactTokensForETHSupportingFeeOnTransferTokens(
+            tokenAmount,
+            0,
+            path,
+            address(this),
+            block.timestamp
         );
     }
 
-    function updateTaxes(uint8 _buyTax, uint8 _sellTax) public onlyOwner {
-        if (_buyTax > 30) {
-            revert CapitaToken__BuyTaxCannotExceed_30();
-        }
-        if (_sellTax > 99) {
-            revert CapitaToken__SellTaxCannotExceed_99();
-        }
-        buyTax = _buyTax;
-        sellTax = _sellTax;
+    function _addLiquidity(uint256 tokenAmount, uint256 ethAmount) private {
+        _approve(address(this), address(uniswapRouter), tokenAmount);
 
-        emit TaxChange(_buyTax, _sellTax);
+        uniswapRouter.addLiquidityETH{value: ethAmount}(
+            address(this),
+            tokenAmount,
+            0,
+            0,
+            owner(),
+            block.timestamp
+        );
     }
 
-    function updateTradingStatus(
-        bool _status,
-        bool _limitsInEffect
-    ) public onlyOwner {
-        tradingEnabled = _status;
-        limitsInEffect = _limitsInEffect;
-        emit TradingStatus(_status, _limitsInEffect);
-    }
-
-    // tax 3% on buy and 3% on sell
-    function _transfer(
-        address sender,
-        address recipient,
-        uint256 amount
-    ) internal virtual override {
-        if (sender == address(0)) {
-            revert CapitaToken__InvalidWallet();
-        }
-        if (recipient == address(0)) {
-            revert CapitaToken__InvalidWallet();
-        }
-        bool from_isExcluded = excludedFromFees[sender];
-        bool to_isExcluded = excludedFromFees[recipient];
-        bool to_AMMPairs = AMMPairs[recipient];
-        bool from_AMMPairs = AMMPairs[sender];
-
-        if (!tradingEnabled) {
-            if (!from_isExcluded && !to_isExcluded) {
-                revert CapitaToken__TradingNotEnabled();
-            }
-        }
-
-        uint256 contractTokenBal = balanceOf(address(this));
-        bool canTransfer = contractTokenBal >= swapAmount;
-
-        if (
-            to_AMMPairs &&
-            !to_isExcluded &&
-            !from_isExcluded &&
-            canTransfer &&
-            !swapping
-        ) {
-            transferTokens(contractTokenBal);
-        }
-
-        uint256 tax = 0;
-        if (!to_isExcluded && from_AMMPairs) {
-            // on buy
-            // take tax and check max per wallet
-            if (limitsInEffect) {
-                if (!excludeFromMaxTx[recipient]) {
-                    if (amount > maxPerTx) {
-                        revert CapitaToken__MaxPerTxExceeded();
-                    }
-
-                    if (amount + balanceOf(recipient) > maxPerWallet) {
-                        revert CapitaToken__MaxPerWalletExceeded();
-                    }
-                }
-            }
-            // tax
-            tax = (amount * buyTax) / 100;
-        } else if (!from_isExcluded && to_AMMPairs) {
-            // on sell
-            if (!excludeFromMaxTx[sender]) {
-                if (amount > maxPerTx) {
-                    revert CapitaToken__MaxPerTxExceeded();
-                }
-            }
-            // tax
-            tax = (amount * sellTax) / 100;
-        } else if (!to_isExcluded) {
-            if (limitsInEffect) {
-                if (amount + balanceOf(recipient) > maxPerWallet) {
-                    revert CapitaToken__MaxPerWalletExceeded();
-                }
-            }
-        }
-
-        if (from_AMMPairs) {
-            amount -= tax;
-            if (tax > 0) {
-                super._transfer(sender, address(this), tax);
-            }
-        } else if (to_AMMPairs) {
-            uint256 totalSwapAmount = amount + tax;
-            if (balanceOf(sender) < totalSwapAmount) {
-                revert CapitaToken__InsufficientTokensForSwap();
-            }
-            if (tax > 0) {
-                super._transfer(sender, address(this), tax);
-            }
-        }
-
-        super._transfer(sender, recipient, amount);
-    }
-
-    function transferTokens(uint256 tokens) private {
-        if (swapping) return;
-        swapping = true;
-        uint256 initialETHBalance = address(this).balance;
-        swapTokensForEth(tokens);
-
-        uint256 ethBalance = address(this).balance - (initialETHBalance);
-
-        uint256 ethToMarketing = (ethBalance * marketingWalletPercent) / 100;
-        uint256 ethToDev = (ethBalance * developmentWalletPercent) / 100;
-        uint256 ethToLq = (ethBalance * liquidityWalletPercent) / 100;
-
-        (bool success, ) = marketingWallet.call{value: ethToMarketing}("");
-        require(success, "Marketing transfer failed");
-
-        (bool success_dev, ) = developmentWallet.call{value: ethToDev}("");
-        require(success_dev, "Dev transfer failed");
-
-        (bool success_liq, ) = liquidityWallet.call{value: ethToLq}("");
-        require(success_liq, "Liquidity transfer failed");
-
-        swapping = false;
-    }
-
-    function swapTokensForEth(uint256 tokenAmount) private {
-        // generate the uniswap pair path of token -> weth
-        address[] memory path = new address[](2);
-        path[0] = address(this);
-        path[1] = i_UNISWAP_V2_ROUTER02.WETH();
-
-        _approve(address(this), address(i_UNISWAP_V2_ROUTER02), tokenAmount);
-
-        // make the swap
-        i_UNISWAP_V2_ROUTER02
-            .swapExactTokensForETHSupportingFeeOnTransferTokens(
-                tokenAmount,
-                0, // accept any amount of ETH
-                path,
-                address(this),
-                block.timestamp
-            );
-    }
-
-    function rescueETH(address to, uint256 amount) public onlyOwner {
-        (bool success, ) = to.call{value: amount}("");
-        require(success, "Transfer failed");
-    }
+    receive() external payable {}
 }

@@ -16,7 +16,8 @@ error CapitaToken__MaxPerTxExceeded();
 error CapitaToken__InvalidWallet();
 error CapitaToken__InsufficientTokensForSwap();
 
-contract CapitaToken is ERC20, Ownable, ReentrancyGuard {
+
+contract CapitaToken is ERC20, Ownable {
 
     uint256 public maxPerTx;
     uint256 public maxPerWallet;
@@ -53,8 +54,8 @@ contract CapitaToken is ERC20, Ownable, ReentrancyGuard {
     event TaxesUpdated(uint256 buyTax, uint256 sellTax);
     event MaxLimitsUpdated(uint256 maxPerTx, uint256 maxPerWallet);
     event SwapAmountUpdated(uint256 newSwapAmount);
-    event OwnershipRenounced(address indexed previousOwner);
-    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event OwnershipUpdated(address indexed previousOwner);
+    event OwnershipRenounced(address indexed previousOwner, address indexed newOwner);
     event WalletsUpdated(address indexed newMarketingWallet, address indexed newDevelopmentWallet);
 
     constructor(
@@ -62,11 +63,11 @@ contract CapitaToken is ERC20, Ownable, ReentrancyGuard {
         address _marketingWallet,
         address _developmentWallet,
         uint256 _swapAmount
-    ) ERC20("CapitaToken", "CPT") {
+    ) ERC20("CapitaToken", "CPT") Ownable(msg.sender) {
         require(_routerAddress != address(0), "Invalid Router Address");
         require(_marketingWallet != address(0), "Invalid Marketing Wallet");
         require(_developmentWallet != address(0), "Invalid Development Wallet");
-
+        
         marketingWallet = _marketingWallet;
         developmentWallet = _developmentWallet;
         swapAmount = _swapAmount;
@@ -102,6 +103,7 @@ contract CapitaToken is ERC20, Ownable, ReentrancyGuard {
      function updateWallets(address _newMarketingWallet, address _newDevelopmentWallet) external onlyOwner {
         require(_newMarketingWallet != address(0), "Invalid Marketing Wallet");
         require(_newDevelopmentWallet != address(0), "Invalid Development Wallet");
+
         marketingWallet = _newMarketingWallet;
         developmentWallet = _newDevelopmentWallet;
         emit WalletsUpdated(_newMarketingWallet, _newDevelopmentWallet);
@@ -139,41 +141,33 @@ contract CapitaToken is ERC20, Ownable, ReentrancyGuard {
 
         }
 
-    function _transfer(address from, address to, uint256 amount) internal override {
-        if (!tradingEnabled && !isWhitelisted[from] && !isWhitelisted[to]) {
-            revert CapitaToken__TradingNotEnabled();
-        }
-
-        if (!isExcludedFromMaxPerTx[from] && !isExcludedFromMaxPerTx[to]) {
-            require(amount <= maxPerTx, "Transfer exceeds max per transaction limit");
-        }
-
-        if (!isExcludedFromMaxPerWallet[to]) {
-            require(balanceOf(to) + amount <= maxPerWallet, "Transfer exceeds max wallet limit");
-        }
-        
-     function transferOwnership(address newOwner) public override onlyOwner {
+    
+     function transferOwnership(address newOwner) public virtual override onlyOwner {
         require(newOwner != address(0), "New owner cannot be zero address");
         emit OwnershipTransferred(owner(), newOwner);
         _transferOwnership(newOwner);
     }
 
     function renounceOwnership() public override onlyOwner {
-        emit OwnershipRenounced(owner());
-        _transferOwnership(address(0));
-    }
+        _transferOwnership(address(0)); 
+}
+    
 
     function recoverTokens(address tokenAddress, uint256 amount) external onlyOwner {
         IERC20(tokenAddress).transfer(owner(), amount);
     }
+  
+          function _transfer(address from, address to, uint256 amount) internal override {
+        if (!tradingEnabled && !isWhitelisted[from] && !isWhitelisted[to]) {
+            revert CapitaToken__TradingNotEnabled();
+        }
 
-       
         uint256 taxAmount = 0;
         if (!isExcludedFromTax[from] && !isExcludedFromTax[to]) {
             if (from == uniswapPair) {
-                taxAmount = amount * buyTax / 100;
+                taxAmount = (amount * buyTax) / 100;
             } else if (to == uniswapPair) {
-                taxAmount = amount * sellTax / 100;
+                taxAmount = (amount * sellTax) / 100;
             }
 
             if (taxAmount > 0) {
@@ -189,7 +183,7 @@ contract CapitaToken is ERC20, Ownable, ReentrancyGuard {
         }
     }
 
-    function _swapAndDistribute() private lockSwap nonReentrant {
+    function _swapAndDistribute() private lockSwap {
         uint256 contractBalance = balanceOf(address(this));
         require(contractBalance >= swapAmount, "Insufficient tokens for swap");
 
@@ -215,20 +209,24 @@ contract CapitaToken is ERC20, Ownable, ReentrancyGuard {
     } 
 
     function _swapTokensForEth(uint256 tokenAmount) private {
-        address;
-        path[0] = address(this);
-        path[1] = uniswapRouter.WETH();
+    require(tokenAmount > 0, "Swap amount must be greater than zero");
+    
+    address[] memory path = new address[](2); 
+    path[0] = address(this);
+    path[1] = uniswapRouter.WETH();
 
-        _approve(address(this), address(uniswapRouter), tokenAmount);
+    _approve(address(this), address(uniswapRouter), tokenAmount);
 
-        uniswapRouter.swapExactTokensForETHSupportingFeeOnTransferTokens(
-            tokenAmount,
-            0,
-            path,
-            address(this),
-            block.timestamp
-        );
-    }
+    uniswapRouter.swapExactTokensForETHSupportingFeeOnTransferTokens(
+        tokenAmount,
+        0, 
+        path,
+        address(this),
+        block.timestamp
+    );
+}
+
+
 
     function _addLiquidity(uint256 tokenAmount, uint256 ethAmount) private {
         _approve(address(this), address(uniswapRouter), tokenAmount);

@@ -22,11 +22,11 @@ const config: HardhatUserConfig = {
   },
 
   networks: {
-    hardhat: {
-      forking: {
-        url: `https://base-mainnet.g.alchemy.com/v2/${alchemyEndpointKey}`,
-      },
-    },
+    // hardhat: {
+    //   forking: {
+    //     url: `https://base-mainnet.g.alchemy.com/v2/${alchemyEndpointKey}`,
+    //   },
+    // },
 
     base: {
       url: `https://base-mainnet.g.alchemy.com/v2/${alchemyEndpointKey}`,

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "./PersonalFundMe.sol";
+import {PersonalFundMe} from "./PersonalFundMe.sol";
+import {PriceFeed} from "../lib/PriceFeed.sol";
+import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 
 error CapitaFundingFactory__NotOwner();
 error CapitaFundingFactory__NotModerator();
@@ -9,9 +11,14 @@ error CapitaFundingFactory__InsufficientFee();
 error CapitaFundingFactory__WithdrawFailed();
 
 contract CapitaFundingFactory {
+    using PriceFeed for uint256;
+
     address public owner;
-    uint256 public fee = 3 ether;
+    uint256 public feeInUsd = 3 ether;
     address[] public deployedCampaigns;
+
+    AggregatorV3Interface public priceFeedAddress;
+
     mapping(address => bool) public moderators;
     mapping(address => address[]) public userCampaigns; // Tracks each user's fundMe contracts
 
@@ -30,8 +37,9 @@ contract CapitaFundingFactory {
         _;
     }
 
-    constructor() {
+    constructor(address _priceFeedAddress) {
         owner = msg.sender;
+        priceFeedAddress = AggregatorV3Interface(_priceFeedAddress);
     }
 
     function addModerator(address _moderator) external onlyOwner {
@@ -49,7 +57,8 @@ contract CapitaFundingFactory {
         uint256 _maxFund,
         uint256 _duration
     ) external payable {
-        if (msg.value < fee) revert CapitaFundingFactory__InsufficientFee();
+        if (msg.value.ethToUsd(priceFeedAddress) < feeInUsd)
+            revert CapitaFundingFactory__InsufficientFee();
 
         PersonalFundMe newFundMe = new PersonalFundMe(
             msg.sender,
